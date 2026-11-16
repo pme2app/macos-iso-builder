@@ -48,6 +48,14 @@ jobs:
           echo "_build=false" >> $GITHUB_OUTPUT
           sum() { printf '%s\n' "$@" >> "$GITHUB_STEP_SUMMARY"; }
 
+          # DMG images are rarely built by other forks - the recent forks list
+          # is almost all ISO - so a DMG request is not a redundant build.
+          # Never gate it behind the star requirement.
+          if [ "${{ inputs.image_format }}" = "dmg" ]; then
+            echo "_build=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
           # Third time's the charm
           if [ ${{ github.run_attempt }} -ge 3 ] || [ ${{ github.run_number }} -ge 3 ]; then
             echo "_build=true" >> $GITHUB_OUTPUT
