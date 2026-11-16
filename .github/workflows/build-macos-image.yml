@@ -48,32 +48,17 @@ jobs:
           echo "_build=false" >> $GITHUB_OUTPUT
           sum() { printf '%s\n' "$@" >> "$GITHUB_STEP_SUMMARY"; }
 
-          # DMG images are rarely built by other forks - the recent forks list
-          # is almost all ISO - so a DMG request is not a redundant build.
-          # Never gate it behind the star requirement.
-          if [ "${{ inputs.image_format }}" = "dmg" ]; then
-            echo "_build=true" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
-          # Third time's the charm
+          # Third time's the charm: force a fresh build after a few attempts
           if [ ${{ github.run_attempt }} -ge 3 ] || [ ${{ github.run_number }} -ge 3 ]; then
             echo "_build=true" >> $GITHUB_OUTPUT
             exit 0
           fi
 
-          # Most users arrive directly at the Actions tab without reading the
-          # README, missing the prebuilt images in the Releases tab. Requiring
-          # a star (step 1 of the README) reduces redundant builds - and runner
-          # costs - for images that may already exist in a recent forks list.
-          #
-          # GET /repos/{owner}/{repo}/stargazers has been admin/collaborator
-          # only since 2026-06-30, and Actions' app-install token is refused
-          # even on its own repo ("Resource not accessible by integration").
-          # Ask the reverse question instead - is this repo in the actor's
-          # starred list - which is still unrestricted. Sorted newest-first,
-          # so a star made just before dispatching lands on page 1.
-          FOUND=false
+          VERSION_KEY="macOS_$(echo "${{ inputs.macos_version }}" | tr '[:upper:]' '[:lower:]' | tr ' ' '_')"
+          FORMAT="${{ inputs.image_format }}"
+
+          # A star is a shortcut: go straight to a fresh build without searching
+          STARRED=false
           PAGE=1
           while [ $PAGE -le 5 ]; do
             DATA=$(curl -s \
@@ -81,20 +66,54 @@ jobs:
               -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
               "https://api.github.com/users/${{ github.actor }}/starred?per_page=100&page=${PAGE}")
             [ "$(echo "$DATA" | jq -r 'type')" = "array" ] || break
-            echo "$DATA" | jq -e 'any(.[]; .full_name == "LongQT-sea/macos-iso-builder")' > /dev/null && FOUND=true && break
+            echo "$DATA" | jq -e 'any(.[]; .full_name == "LongQT-sea/macos-iso-builder")' > /dev/null && STARRED=true && break
             [ "$(echo "$DATA" | jq 'length')" -lt 100 ] && break
             PAGE=$((PAGE + 1))
           done
 
-          if [ "$FOUND" = "true" ]; then
+          if [ "$STARRED" = "true" ]; then
             echo "_build=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Skip only when the Recent Forks List has a Full Installer artifact
+          # matching BOTH the requested macOS version and image format.
+          # Recovery ISOs are a different product, so exclude them.
+          # An ISO-only match must not suppress a DMG build (and vice versa).
+          BODY=$(curl -s \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/LongQT-sea/macos-iso-builder/releases/latest" \
+            | jq -r '.body // ""')
+
+          MATCH=""
+          if [ -n "$BODY" ]; then
+            ARTIFACTS=$(echo "$BODY" \
+              | grep -oiE 'macOS_[A-Za-z0-9_.-]+\.(dmg\.img|iso)' \
+              | grep -viF '_Recovery' \
+              | sort -u)
+            if [ "$FORMAT" = "dmg" ]; then
+              MATCH=$(echo "$ARTIFACTS" | grep -iF "$VERSION_KEY" | grep -F '.dmg.img' | head -1)
+            else
+              MATCH=$(echo "$ARTIFACTS" | grep -iF "$VERSION_KEY" | grep -E '\.iso$' | head -1)
+            fi
+          fi
+
+          if [ -n "$MATCH" ]; then
+            sum "## Found **${MATCH}** in the [Recent Forks List](https://github.com/LongQT-sea/macos-iso-builder/releases/latest)" \
+                "" \
+                "An image with the same macOS version and format already exists. Download it instead of building a duplicate:" \
+                "" \
+                "1. Open the forks list above" \
+                "2. Find the artifact **${MATCH}** and open its workflow run" \
+                "3. Scroll down to the **Artifacts** section to download" \
+                "" \
+                "> Star [LongQT-sea/macos-iso-builder](https://github.com/LongQT-sea/macos-iso-builder) to skip this search and always build fresh. :star:"
           else
-            sum "## Before you build - check if someone already did it for you :point_down:" \
+            sum "No matching ${FORMAT} image for ${VERSION_KEY} in the Recent Forks List. Starting build..." \
                 "" \
-                "Browse the **[Recent Forks List](https://github.com/LongQT-sea/macos-iso-builder/releases/latest)** - someone may have already built the macOS version you need." \
-                "" \
-                "If you still need to build your own, star this repo first [LongQT-sea/macos-iso-builder](https://github.com/LongQT-sea/macos-iso-builder) - that's step 1 in the [README](https://github.com/LongQT-sea/macos-iso-builder#how-to-use). :star:" \
-                "<br>![star](https://raw.githubusercontent.com/LongQT-sea/macos-iso-builder/main/.github/star.jpg)"
+                "> Star [LongQT-sea/macos-iso-builder](https://github.com/LongQT-sea/macos-iso-builder) to skip this search and always build fresh. :star:"
+            echo "_build=true" >> $GITHUB_OUTPUT
           fi
 
   build-macos-image:
